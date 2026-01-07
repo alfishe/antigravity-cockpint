@@ -7,6 +7,8 @@ import re
 import ssl
 import urllib.request
 import urllib.error
+import signal
+import shutil
 from datetime import datetime
 
 # Configuration
@@ -18,6 +20,17 @@ ANSI_CYAN = "\033[36m"
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_CLEAR_LINE = "\033[K"
+ANSI_HOME = "\033[H"
+ANSI_CLEAR_SCREEN = "\033[2J"
+ANSI_CLEAR_EOS = "\033[J" # Clear from cursor to end of screen
+
+# Custom exception to interrupt sleep on resize
+class ResizeInterrupt(Exception):
+    pass
+
+def handle_resize(signum, frame):
+    """Signal handler for window resize events."""
+    raise ResizeInterrupt()
 
 def get_process_info():
     """Finds the Antigravity process and extracts PID and CSRF token."""
@@ -38,7 +51,6 @@ def get_process_info():
                 if token_match:
                     return pid, token_match.group(1)
     except Exception:
-        # Suppress errors to avoid breaking TUI layout
         pass
     return None, None
 
@@ -49,15 +61,12 @@ def get_listening_port(pid):
         output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8')
         
         # Look for a line with a port
-        # Example output line: language_ 55083 dev 18u IPv4 ... TCP 127.0.0.1:55052 (LISTEN)
         for line in output.splitlines():
             if '(LISTEN)' in line:
-                # Match 127.0.0.1:PORT or *:PORT
                 match = re.search(r'(?:127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\*):(\d+)', line)
                 if match:
                     return match.group(1)
     except Exception:
-        # Suppress errors (lsof returns 1 if no files found)
         pass
     return None
 
@@ -77,7 +86,6 @@ def fetch_status(port, token):
         }
     }).encode('utf-8')
 
-    # Ignore self-signed certificates
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -95,7 +103,6 @@ def format_time_delta(iso_time_str):
     if not iso_time_str:
         return "N/A"
     try:
-        # Handle potential 'Z' or offset
         reset_dt = datetime.strptime(iso_time_str.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z")
         now_dt = datetime.now(reset_dt.tzinfo)
         delta = reset_dt - now_dt
@@ -125,19 +132,26 @@ def draw_progress_bar(percent, width=20):
     bar = "█" * filled + "░" * (width - filled)
     return f"{color_percentage(percent)}{bar}{ANSI_RESET}"
 
+def get_terminal_width():
+    """Gets the current terminal width."""
+    return shutil.get_terminal_size().columns
+
 def print_dashboard(data, pid, port):
-    """Prints the dashboard to the terminal and returns line count."""
+    """Prints the dashboard to the terminal."""
     user_status = data.get('userStatus', {})
     plan_info = user_status.get('planStatus', {}).get('planInfo', {})
     prompt_credits = user_status.get('planStatus', {}).get('availablePromptCredits', 0)
     monthly_credits = plan_info.get('monthlyPromptCredits', 0)
+    
+    term_width = get_terminal_width()
+    separator = "-" * min(term_width, 80)
     
     output_lines = []
     
     # Header
     output_lines.append(f"{ANSI_BOLD}🚀 Antigravity Cockpit Monitor{ANSI_RESET}{ANSI_CLEAR_LINE}")
     output_lines.append(f"PID: {ANSI_CYAN}{pid}{ANSI_RESET} | Port: {ANSI_CYAN}{port}{ANSI_RESET} | Time: {datetime.now().strftime('%H:%M:%S')}{ANSI_CLEAR_LINE}")
-    output_lines.append(f"{'-' * 60}{ANSI_CLEAR_LINE}")
+    output_lines.append(f"{separator}{ANSI_CLEAR_LINE}")
     
     # User Profile
     output_lines.append(f"User:  {ANSI_BOLD}{user_status.get('name', 'Unknown')}{ANSI_RESET} ({user_status.get('email', 'N/A')}){ANSI_CLEAR_LINE}")
@@ -157,18 +171,16 @@ def print_dashboard(data, pid, port):
         flow_pct = (flow_credits / monthly_flow) * 100
         output_lines.append(f"Monthly Flow Quota:   {draw_progress_bar(flow_pct)} {flow_credits:,} / {monthly_flow:,} ({flow_pct:.1f}%){ANSI_CLEAR_LINE}")
 
-    output_lines.append(f"{'-' * 60}{ANSI_CLEAR_LINE}")
+    output_lines.append(f"{separator}{ANSI_CLEAR_LINE}")
     output_lines.append(f"{ANSI_BOLD}{'Model Name':<35} {'Usage':<22} {'Reset In'}{ANSI_RESET}{ANSI_CLEAR_LINE}")
-    output_lines.append(f"{'-' * 60}{ANSI_CLEAR_LINE}")
+    output_lines.append(f"{separator}{ANSI_CLEAR_LINE}")
     
     # Models
     models = user_status.get('cascadeModelConfigData', {}).get('clientModelConfigs', [])
-    
-    # Sort models: Recommended first, then by name
     models.sort(key=lambda x: (not x.get('isRecommended', False), x.get('label', '')))
 
     for model in models:
-        name = model.get('label', 'Unknown')
+        name = model.get('label', 'Unknown')[:34] # Truncate long names
         quota = model.get('quotaInfo', {})
         remaining = quota.get('remainingFraction', 0)
         reset_time = quota.get('resetTime')
@@ -179,62 +191,59 @@ def print_dashboard(data, pid, port):
         
         output_lines.append(f"{name:<35} {bar} {percent:>5.1f}%  {reset_display}{ANSI_CLEAR_LINE}")
 
-    # Print all lines at once
     print('\n'.join(output_lines))
-    return len(output_lines)
 
 def main():
     print("Initializing Monitor...")
-    last_lines_count = 0
-    was_connected = False
+    
+    # Register resize handler
+    signal.signal(signal.SIGWINCH, handle_resize)
     
     # Initial clear
-    print("\033[2J\033[H", end='')
+    print(ANSI_CLEAR_SCREEN, end='')
 
     while True:
-        # Move cursor up to overwrite previous output
-        if last_lines_count > 0:
-            print(f"\033[{last_lines_count}A", end='')
+        try:
+            # Always move to Home (Top-Left) before drawing
+            print(ANSI_HOME, end='')
             
-        pid, token = get_process_info()
-        
-        if not pid:
-            status_msg = f"{ANSI_YELLOW}●{ANSI_RESET} Waiting for Antigravity process..."
-            if was_connected:
-                status_msg = f"{ANSI_RED}●{ANSI_RESET} Connection lost. Waiting for process to restart..."
+            pid, token = get_process_info()
             
-            print(f"{status_msg}{ANSI_CLEAR_LINE}")
-            print(f"  Scanning process list... (Retrying in {REFRESH_INTERVAL}s){ANSI_CLEAR_LINE}")
-            print("\033[J", end='') # Clear rest of screen
+            if not pid:
+                print(f"{ANSI_YELLOW}●{ANSI_RESET} Waiting for Antigravity process...{ANSI_CLEAR_LINE}")
+                print(f"  Scanning process list...{ANSI_CLEAR_LINE}")
+                print(ANSI_CLEAR_EOS, end='') # Clear everything below
+                
+                time.sleep(REFRESH_INTERVAL)
+                continue
+                
+            port = get_listening_port(pid)
+            if not port:
+                print(f"{ANSI_YELLOW}●{ANSI_RESET} Process detected (PID {pid}), waiting for port...{ANSI_CLEAR_LINE}")
+                print(f"  Service initializing...{ANSI_CLEAR_LINE}")
+                print(ANSI_CLEAR_EOS, end='')
+                
+                time.sleep(REFRESH_INTERVAL)
+                continue
+                
+            data = fetch_status(port, token)
             
-            last_lines_count = 2
+            if data:
+                print_dashboard(data, pid, port)
+                print(ANSI_CLEAR_EOS, end='') # Clear any leftovers
+            else:
+                print(f"{ANSI_RED}●{ANSI_RESET} Connected to PID {pid} but API is unresponsive.{ANSI_CLEAR_LINE}")
+                print(f"  Retrying request...{ANSI_CLEAR_LINE}")
+                print(ANSI_CLEAR_EOS, end='')
+            
+            sys.stdout.flush()
             time.sleep(REFRESH_INTERVAL)
+            
+        except ResizeInterrupt:
+            # On resize, immediately continue loop which re-prints
+            # Screen clearing is handled by ANSI_HOME + ANSI_CLEAR_EOS logic
             continue
             
-        port = get_listening_port(pid)
-        if not port:
-            print(f"{ANSI_YELLOW}●{ANSI_RESET} Process detected (PID {pid}), waiting for port...{ANSI_CLEAR_LINE}")
-            print(f"  Service initializing...{ANSI_CLEAR_LINE}")
-            print("\033[J", end='')
-            
-            last_lines_count = 2
-            time.sleep(REFRESH_INTERVAL)
-            continue
-            
-        data = fetch_status(port, token)
-        
-        if data:
-            was_connected = True
-            last_lines_count = print_dashboard(data, pid, port)
-            print("\033[J", end='') # Clear any lines below if dashboard shrank
-        else:
-            print(f"{ANSI_RED}●{ANSI_RESET} Connected to PID {pid} but API is unresponsive.{ANSI_CLEAR_LINE}")
-            print(f"  Retrying request...{ANSI_CLEAR_LINE}")
-            print("\033[J", end='')
-            last_lines_count = 2
-            
-        time.sleep(REFRESH_INTERVAL)
-
 if __name__ == "__main__":
     try:
         main()
