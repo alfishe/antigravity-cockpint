@@ -17,6 +17,7 @@ ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_RED = "\033[31m"
 ANSI_CYAN = "\033[36m"
+ANSI_GRAY = "\033[90m"
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_CLEAR_LINE = "\033[K"
@@ -120,17 +121,27 @@ def format_time_delta(iso_time_str):
     except Exception:
         return iso_time_str
 
-def color_percentage(percent):
-    """Returns ANSI color code based on percentage."""
+def color_quota_percentage(percent):
+    """Returns ANSI color code based on percentage used.
+    Gray by default. Red only if 90% or more used.
+    """
+    if percent >= 90:
+        return ANSI_RED
+    return ANSI_GRAY
+
+def color_model_percentage(percent):
+    """Returns ANSI color code based on percentage remaining.
+    Standard health check: Green (>50%), Yellow (>20%), Red (<=20%).
+    """
     if percent > 50: return ANSI_GREEN
     if percent > 20: return ANSI_YELLOW
     return ANSI_RED
 
-def draw_progress_bar(percent, width=20):
+def draw_progress_bar(percent, width=20, color_func=color_quota_percentage):
     """Draws a text-based progress bar."""
     filled = int(width * percent / 100)
     bar = "█" * filled + "░" * (width - filled)
-    return f"{color_percentage(percent)}{bar}{ANSI_RESET}"
+    return f"{color_func(percent)}{bar}{ANSI_RESET}"
 
 def get_terminal_width():
     """Gets the current terminal width."""
@@ -160,7 +171,7 @@ def print_dashboard(data, pid, port):
     # Global Credits
     if monthly_credits > 0:
         credit_pct = (prompt_credits / monthly_credits) * 100
-        output_lines.append(f"Monthly Prompt Quota: {draw_progress_bar(credit_pct)} {prompt_credits:,} / {monthly_credits:,} ({credit_pct:.1f}%){ANSI_CLEAR_LINE}")
+        output_lines.append(f"Monthly Prompt Quota: {draw_progress_bar(credit_pct, color_func=color_quota_percentage)} {prompt_credits:,} / {monthly_credits:,} ({credit_pct:.1f}%){ANSI_CLEAR_LINE}")
     else:
         output_lines.append(f"Prompt Quota:         {prompt_credits:,} (No limit info){ANSI_CLEAR_LINE}")
 
@@ -169,7 +180,7 @@ def print_dashboard(data, pid, port):
 
     if monthly_flow > 0:
         flow_pct = (flow_credits / monthly_flow) * 100
-        output_lines.append(f"Monthly Flow Quota:   {draw_progress_bar(flow_pct)} {flow_credits:,} / {monthly_flow:,} ({flow_pct:.1f}%){ANSI_CLEAR_LINE}")
+        output_lines.append(f"Monthly Flow Quota:   {draw_progress_bar(flow_pct, color_func=color_quota_percentage)} {flow_credits:,} / {monthly_flow:,} ({flow_pct:.1f}%){ANSI_CLEAR_LINE}")
 
     output_lines.append(f"{separator}{ANSI_CLEAR_LINE}")
     output_lines.append(f"{ANSI_BOLD}{'Model Name':<35} {'Usage':<22} {'Reset In'}{ANSI_RESET}{ANSI_CLEAR_LINE}")
@@ -186,7 +197,7 @@ def print_dashboard(data, pid, port):
         reset_time = quota.get('resetTime')
         
         percent = remaining * 100
-        bar = draw_progress_bar(percent, width=15)
+        bar = draw_progress_bar(percent, width=15, color_func=color_model_percentage)
         reset_display = format_time_delta(reset_time)
         
         output_lines.append(f"{name:<35} {bar} {percent:>5.1f}%  {reset_display}{ANSI_CLEAR_LINE}")
