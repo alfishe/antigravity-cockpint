@@ -1,6 +1,6 @@
 # 🚀 Antigravity Cockpit Monitor
 
-> **Real-time telemetry and quota tracking for your local Antigravity AI engine.**
+> **Real-time telemetry and quota tracking for your Google Antigravity IDE.**
 
 ![Python](https://img.shields.io/badge/Python-3.6%2B-blue?style=for-the-badge&logo=python)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey?style=for-the-badge)
